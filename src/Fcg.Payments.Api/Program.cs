@@ -1,6 +1,7 @@
 using System.Globalization;
 using Fcg.Payments.Consumers;
 using Fcg.Payments.Payments;
+using Fcg.Payments.Payments.Rules;
 using Fcg.Payments.Persistence;
 using MassTransit;
 using MongoDB.Driver;
@@ -20,6 +21,14 @@ var mongoDatabaseName = builder.Configuration["MongoDbSettings:DatabaseName"] ??
 builder.Services.AddSingleton<IMongoClient>(_ => new MongoClient(mongoConnectionString));
 builder.Services.AddSingleton(sp => sp.GetRequiredService<IMongoClient>().GetDatabase(mongoDatabaseName));
 builder.Services.AddScoped<IPaymentRepository, PaymentRepository>();
+
+// Regras de decisão plugáveis (qualquer rejeição -> Rejected) + fonte de aleatoriedade injetável.
+builder.Services.AddSingleton<IRandomSource, RandomSource>();
+builder.Services.AddSingleton<IPaymentRule, AmountLimitRule>();
+builder.Services.AddSingleton<IPaymentRule, BlockedUserRule>();
+builder.Services.AddSingleton<IPaymentRule, BlockedGameRule>();
+builder.Services.AddSingleton<IPaymentRule, RandomFailureRule>();
+builder.Services.AddSingleton<IPaymentDecider, PaymentDecider>();
 
 // Config do RabbitMQ (reutilizada pela mensageria e pelo health check).
 var rabbitHost = builder.Configuration["RabbitMq:Host"] ?? "localhost";

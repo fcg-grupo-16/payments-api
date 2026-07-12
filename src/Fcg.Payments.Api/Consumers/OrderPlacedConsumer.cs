@@ -2,7 +2,6 @@ using Fcg.Contracts.Events;
 using Fcg.Payments.Payments;
 using Fcg.Payments.Persistence;
 using MassTransit;
-using Microsoft.Extensions.Options;
 
 namespace Fcg.Payments.Consumers;
 
@@ -15,16 +14,16 @@ public sealed class OrderPlacedConsumer : IConsumer<OrderPlacedEvent>
     private static readonly TimeSpan SimulatedProcessingDelay = TimeSpan.FromMilliseconds(500);
 
     private readonly ILogger<OrderPlacedConsumer> _logger;
-    private readonly PaymentsOptions _options;
+    private readonly IPaymentDecider _decider;
     private readonly IPaymentRepository _repository;
 
     public OrderPlacedConsumer(
         ILogger<OrderPlacedConsumer> logger,
-        IOptions<PaymentsOptions> options,
+        IPaymentDecider decider,
         IPaymentRepository repository)
     {
         _logger = logger;
-        _options = options.Value;
+        _decider = decider;
         _repository = repository;
     }
 
@@ -40,7 +39,7 @@ public sealed class OrderPlacedConsumer : IConsumer<OrderPlacedEvent>
         // Simula um tempo fixo de processamento do pagamento.
         await Task.Delay(SimulatedProcessingDelay, ct);
 
-        var status = PaymentDecision.Decide(order.Price, _options.MaxApprovedAmount);
+        var status = _decider.Decide(new PaymentContext(order.UserId, order.GameId, order.Price));
 
         // Idempotência por OrderId: a coleção `payments` (índice único em OrderId) é o registro
         // dos pedidos já processados. RegistrarAsync insere e retorna false se o OrderId já existe.
@@ -65,8 +64,8 @@ public sealed class OrderPlacedConsumer : IConsumer<OrderPlacedEvent>
         }
 
         _logger.LogInformation(
-            "Pagamento processado. OrderId={OrderId}, Status={Status} (limite de aprovação: {Limit})",
-            order.OrderId, status, _options.MaxApprovedAmount);
+            "Pagamento processado. OrderId={OrderId}, Status={Status}",
+            order.OrderId, status);
 
         await context.Publish(new PaymentProcessedEvent
         {
