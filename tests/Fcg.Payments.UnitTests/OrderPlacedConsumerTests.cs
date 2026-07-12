@@ -1,6 +1,7 @@
 using Fcg.Contracts.Events;
 using Fcg.Payments.Consumers;
 using Fcg.Payments.Payments;
+using Fcg.Payments.Payments.Rules;
 using Fcg.Payments.Persistence;
 using FluentAssertions;
 using MassTransit;
@@ -41,6 +42,12 @@ public class OrderPlacedConsumerTests
         new ServiceCollection()
             .AddSingleton<IPaymentRepository>(repo)
             .AddSingleton(Options.Create(new PaymentsOptions { MaxApprovedAmount = 5000m }))
+            .AddSingleton<IRandomSource, RandomSource>()
+            .AddSingleton<IPaymentRule, AmountLimitRule>()
+            .AddSingleton<IPaymentRule, BlockedUserRule>()
+            .AddSingleton<IPaymentRule, BlockedGameRule>()
+            .AddSingleton<IPaymentRule, RandomFailureRule>()
+            .AddSingleton<IPaymentDecider, PaymentDecider>()
             .AddMassTransitTestHarness(x => x.AddConsumer<OrderPlacedConsumer>())
             .BuildServiceProvider(true);
 
