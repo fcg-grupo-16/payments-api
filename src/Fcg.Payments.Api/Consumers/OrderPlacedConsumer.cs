@@ -58,6 +58,10 @@ public sealed class OrderPlacedConsumer : IConsumer<OrderPlacedEvent>
             "Pagamento processado. OrderId={OrderId}, Status={Status} (limite de aprovação: {Limit}, novo registro: {Inserido})",
             order.OrderId, status, _options.MaxApprovedAmount, inserido);
 
+        // Publicamos SEMPRE (inclusive em reentrega, quando inserido==false): a decisão é
+        // determinística (mesmo Price -> mesmo Status), então não há divergência, e a semântica
+        // é at-least-once — o consumer do catalog é idempotente (só transiciona de Pending).
+        // A deduplicação de CONSUMO (não reprocessar de fato) é escopo da idempotência (#1, inbox).
         await context.Publish(new PaymentProcessedEvent
         {
             OrderId = order.OrderId,

@@ -15,7 +15,7 @@ public sealed class PaymentRepository : IPaymentRepository
     {
         try
         {
-            await _payments.InsertOneAsync(payment, options: null, ct);
+            await _payments.InsertOneAsync(payment, cancellationToken: ct);
             return true;
         }
         catch (MongoWriteException ex) when (ex.WriteError?.Category == ServerErrorCategory.DuplicateKey)

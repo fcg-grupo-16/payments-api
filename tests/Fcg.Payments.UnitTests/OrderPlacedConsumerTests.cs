@@ -81,14 +81,20 @@ public class OrderPlacedConsumerTests
         await harness.Start();
         try
         {
+            var orderId = Guid.NewGuid();
             await harness.Bus.Publish(new OrderPlacedEvent
             {
-                OrderId = Guid.NewGuid(), UserId = "u", GameId = "g", Price = 9999m
+                OrderId = orderId, UserId = "u", GameId = "g", Price = 9999m
             });
 
             (await harness.Consumed.Any<OrderPlacedEvent>()).Should().BeTrue();
             repo.Registrados.Should().ContainSingle()
                 .Which.Status.Should().Be(PaymentDecision.Rejected);
+
+            // Também publica o PaymentProcessedEvent, com o OrderId consumido e Status Rejected.
+            (await harness.Published.Any<PaymentProcessedEvent>(x =>
+                x.Context.Message.OrderId == orderId && x.Context.Message.Status == PaymentDecision.Rejected))
+                .Should().BeTrue();
         }
         finally
         {
