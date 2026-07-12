@@ -1,3 +1,4 @@
+using System.Globalization;
 using Fcg.Payments.Consumers;
 using Fcg.Payments.Payments;
 using Fcg.Payments.Persistence;
@@ -33,6 +34,23 @@ builder.Services.AddMassTransit(x =>
     x.UsingRabbitMq((ctx, cfg) =>
     {
         cfg.Host(rabbitHost, "/", h => { h.Username(rabbitUser); h.Password(rabbitPass); });
+
+        // Scheduler de mensagens atrasadas — usa o plugin rabbitmq_delayed_message_exchange do
+        // broker (imagem custom do orchestration, v0.7.0). Necessário para o delayed redelivery.
+        cfg.UseDelayedMessageScheduler();
+
+        // Redelivery atrasado (second-level retry): esgotado o retry imediato, a mensagem é
+        // devolvida ao broker com intervalos CRESCENTES (default 60/300/900s) antes de ir para a
+        // _error. Configurável via RabbitMq:DelayedRedeliverySeconds (curto em testes).
+        cfg.UseDelayedRedelivery(r => r.Intervals(ParseDelayedIntervals(
+            builder.Configuration["RabbitMq:DelayedRedeliverySeconds"])));
+
+        // Retry imediato (first-level), EXPONENCIAL com limite. Esgotados retry + redelivery, a
+        // mensagem vai para payments-order-placed-event_error (dead-letter), sem ser perdida.
+        var immediateRetries = int.TryParse(builder.Configuration["RabbitMq:ImmediateRetryCount"], out var ir) ? ir : 3;
+        cfg.UseMessageRetry(r => r.Exponential(immediateRetries,
+            TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(3)));
+
         cfg.ConfigureEndpoints(ctx);
     });
 });
@@ -73,3 +91,25 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.Run();
+
+// Parse tolerante de RabbitMq:DelayedRedeliverySeconds. Ignora entradas inválidas/não-positivas e
+// faz fallback para os defaults (60/300/900s) se ausente/vazia/toda inválida — config ruim não
+// pode derrubar o serviço no startup.
+static TimeSpan[] ParseDelayedIntervals(string? raw)
+{
+    var defaults = new[] { TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(300), TimeSpan.FromSeconds(900) };
+    if (string.IsNullOrWhiteSpace(raw))
+    {
+        return defaults;
+    }
+
+    var parsed = raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(s => double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) && v > 0
+            ? TimeSpan.FromSeconds(v)
+            : (TimeSpan?)null)
+        .Where(t => t.HasValue)
+        .Select(t => t!.Value)
+        .ToArray();
+
+    return parsed.Length > 0 ? parsed : defaults;
+}

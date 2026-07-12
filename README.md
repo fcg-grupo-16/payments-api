@@ -121,15 +121,23 @@ Por ser uma função pura, ela é facilmente testada de forma unitária (ver se�
 
 - **.NET 10 SDK** (versão fixada em `global.json`: `10.0.100`).
 - **Docker** — para subir o RabbitMQ localmente e/ou para empacotar o serviço.
-- Um **RabbitMQ** acessível. Para rodar localmente, a forma mais simples é:
+- Um **RabbitMQ** acessível **com o plugin `rabbitmq_delayed_message_exchange`** (exigido pelo
+  delayed redelivery do MassTransit). A imagem `masstransit/rabbitmq` já traz o plugin; a oficial
+  `rabbitmq:3-management` **não**. (No compose/k8s da plataforma, o repo `orchestration` usa uma
+  imagem custom com o plugin.) Para rodar localmente:
 
 ```bash
 docker run -d --name rabbitmq \
   -p 5672:5672 -p 15672:15672 \
-  rabbitmq:3-management
+  masstransit/rabbitmq:3.13.1
 ```
 
 O painel de administração fica em `http://localhost:15672` (usuário/senha padrão: `guest` / `guest`).
+
+> **Resiliência da mensageria:** o consumer usa retry imediato **exponencial** (3 tentativas) e,
+> esgotado, **delayed redelivery** com intervalos crescentes (60/300/900s) antes de a mensagem ir
+> para a fila `payments-order-placed-event_error` (dead-letter), sem ser perdida. Os intervalos são
+> configuráveis (`RabbitMq__ImmediateRetryCount`, `RabbitMq__DelayedRedeliverySeconds`).
 
 ---
 
