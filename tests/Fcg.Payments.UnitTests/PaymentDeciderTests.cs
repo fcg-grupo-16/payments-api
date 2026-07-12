@@ -11,17 +11,20 @@ public class PaymentDeciderTests
     private const decimal Limit = 5000m;
 
     // Fonte de aleatoriedade determinística para teste (percorre a sequência informada).
+    // Respeita o contrato de IRandomSource: valores em [0, 1) — usa BitDecrement(1.0) como "quase 1".
+    private static readonly double AlmostOne = double.BitDecrement(1.0);
+
     private sealed class SequenceRandom(params double[] values) : IRandomSource
     {
         private int _i;
-        public double NextDouble() => values.Length == 0 ? 1.0 : values[_i++ % values.Length];
+        public double NextDouble() => values.Length == 0 ? AlmostOne : values[_i++ % values.Length];
     }
 
     private static IPaymentDecider BuildDecider(PaymentsOptions opt, IRandomSource? random = null)
     {
         var options = Options.Create(opt);
-        // Sem random informado: 1.0 nunca é < rate -> a regra aleatória nunca rejeita.
-        var rnd = random ?? new SequenceRandom(1.0);
+        // Sem random informado: ~1 nunca é < rate -> a regra aleatória nunca rejeita.
+        var rnd = random ?? new SequenceRandom(AlmostOne);
         var rules = new IPaymentRule[]
         {
             new AmountLimitRule(options),
