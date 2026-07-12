@@ -13,15 +13,25 @@ namespace Fcg.Payments.UnitTests;
 
 public class OrderPlacedConsumerTests
 {
-    // Fake em memória do repositório — registra o que seria persistido, sem Mongo.
+    // Fake em memória do repositório — modela o índice único em OrderId de forma ATÔMICA (lock),
+    // como o InsertOne do Mongo: sob concorrência, apenas uma inserção vence; a duplicata retorna false.
     private sealed class FakePaymentRepository : IPaymentRepository
     {
+        private readonly Lock _gate = new();
         public List<Payment> Registrados { get; } = [];
 
         public Task<bool> RegistrarAsync(Payment payment, CancellationToken ct = default)
         {
-            Registrados.Add(payment);
-            return Task.FromResult(true);
+            lock (_gate)
+            {
+                if (Registrados.Any(p => p.OrderId == payment.OrderId))
+                {
+                    return Task.FromResult(false); // OrderId já processado
+                }
+
+                Registrados.Add(payment);
+                return Task.FromResult(true);
+            }
         }
 
         public Task GarantirIndicesAsync(CancellationToken ct = default) => Task.CompletedTask;
@@ -95,6 +105,48 @@ public class OrderPlacedConsumerTests
             (await harness.Published.Any<PaymentProcessedEvent>(x =>
                 x.Context.Message.OrderId == orderId && x.Context.Message.Status == PaymentDecision.Rejected))
                 .Should().BeTrue();
+        }
+        finally
+        {
+            await harness.Stop();
+        }
+    }
+
+    [Fact]
+    public async Task Consume_MesmoOrderIdDuasVezes_DevePersistirEPublicarUmaVezSo()
+    {
+        var repo = new FakePaymentRepository();
+        await using var provider = BuildHarness(repo);
+        var harness = provider.GetRequiredService<ITestHarness>();
+        await harness.Start();
+        try
+        {
+            var orderId = Guid.NewGuid();
+            var evt = new OrderPlacedEvent { OrderId = orderId, UserId = "u", GameId = "g", Price = 100m };
+
+            // Duas entregas do mesmo OrderId (MessageIds distintos): ambas são consumidas.
+            await harness.Bus.Publish(evt);
+            await harness.Bus.Publish(evt);
+
+            // Aguarda os DOIS consumos antes de assertar (sem Take, para evitar ambiguidade).
+            var consumidos = 0;
+            await foreach (var _ in harness.Consumed.SelectAsync<OrderPlacedEvent>())
+            {
+                if (++consumidos == 2)
+                {
+                    break;
+                }
+            }
+            consumidos.Should().Be(2);
+
+            // Idempotência: apenas UM registro persistido.
+            repo.Registrados.Where(p => p.OrderId == orderId.ToString()).Should().ContainSingle();
+
+            // ...e apenas UM PaymentProcessedEvent publicado (espera o publish assentar, depois conta).
+            (await harness.Published.Any<PaymentProcessedEvent>(x => x.Context.Message.OrderId == orderId))
+                .Should().BeTrue();
+            harness.Published.Select<PaymentProcessedEvent>(x => x.Context.Message.OrderId == orderId)
+                .Should().ContainSingle();
         }
         finally
         {

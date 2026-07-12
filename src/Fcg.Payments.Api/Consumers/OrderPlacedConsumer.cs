@@ -42,8 +42,8 @@ public sealed class OrderPlacedConsumer : IConsumer<OrderPlacedEvent>
 
         var status = PaymentDecision.Decide(order.Price, _options.MaxApprovedAmount);
 
-        // Persiste o registro de auditoria ANTES de publicar. Idempotente por OrderId (índice único):
-        // uma reentrega não gera documento duplicado.
+        // Idempotência por OrderId: a coleção `payments` (índice único em OrderId) é o registro
+        // dos pedidos já processados. RegistrarAsync insere e retorna false se o OrderId já existe.
         var inserido = await _repository.RegistrarAsync(new Payment
         {
             OrderId = order.OrderId.ToString(),
@@ -54,14 +54,20 @@ public sealed class OrderPlacedConsumer : IConsumer<OrderPlacedEvent>
             ProcessedAt = DateTime.UtcNow,
         }, ct);
 
-        _logger.LogInformation(
-            "Pagamento processado. OrderId={OrderId}, Status={Status} (limite de aprovação: {Limit}, novo registro: {Inserido})",
-            order.OrderId, status, _options.MaxApprovedAmount, inserido);
+        if (!inserido)
+        {
+            // Pedido já processado (reentrega/duplicata): descarta sem erro e SEM republicar,
+            // garantindo um único PaymentProcessedEvent por OrderId.
+            _logger.LogInformation(
+                "Pagamento duplicado descartado — OrderId já processado. OrderId={OrderId}",
+                order.OrderId);
+            return;
+        }
 
-        // Publicamos SEMPRE (inclusive em reentrega, quando inserido==false): a decisão é
-        // determinística (mesmo Price -> mesmo Status), então não há divergência, e a semântica
-        // é at-least-once — o consumer do catalog é idempotente (só transiciona de Pending).
-        // A deduplicação de CONSUMO (não reprocessar de fato) é escopo da idempotência (#1, inbox).
+        _logger.LogInformation(
+            "Pagamento processado. OrderId={OrderId}, Status={Status} (limite de aprovação: {Limit})",
+            order.OrderId, status, _options.MaxApprovedAmount);
+
         await context.Publish(new PaymentProcessedEvent
         {
             OrderId = order.OrderId,
