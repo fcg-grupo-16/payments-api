@@ -1,15 +1,18 @@
 using Fcg.Payments.Consumers;
 using Fcg.Payments.Payments;
 using MassTransit;
+using Fcg.Payments.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<PaymentsOptions>(
     builder.Configuration.GetSection(PaymentsOptions.SectionName));
 
+// Ativa o suporte básico aos Controllers (Rotas)
+builder.Services.AddControllers();
+
 builder.Services.AddMassTransit(x =>
 {
-    // Prefixo por serviço garante filas distintas entre microsserviços.
     x.SetEndpointNameFormatter(new KebabCaseEndpointNameFormatter("payments", false));
     x.AddConsumer<OrderPlacedConsumer>();
     x.UsingRabbitMq((ctx, cfg) =>
@@ -23,9 +26,13 @@ builder.Services.AddMassTransit(x =>
 });
 
 builder.Services.AddHealthChecks();
+builder.Services.AddScoped<IPaymentService, PixPaymentService>();
 
 var app = builder.Build();
 
 app.MapHealthChecks("/health");
+
+// Mapeia os endpoints dos controllers ativos
+app.MapControllers();
 
 app.Run();
