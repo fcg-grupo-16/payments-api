@@ -38,10 +38,10 @@ public class OrderPlacedConsumerTests
         public Task GarantirIndicesAsync(CancellationToken ct = default) => Task.CompletedTask;
     }
 
-    private static ServiceProvider BuildHarness(FakePaymentRepository repo) =>
+    private static ServiceProvider BuildHarness(FakePaymentRepository repo, PaymentsOptions? options = null) =>
         new ServiceCollection()
             .AddSingleton<IPaymentRepository>(repo)
-            .AddSingleton(Options.Create(new PaymentsOptions { MaxApprovedAmount = 5000m }))
+            .AddSingleton(Options.Create(options ?? new PaymentsOptions { MaxApprovedAmount = 5000m }))
             .AddSingleton<IRandomSource, RandomSource>()
             .AddSingleton<IPaymentRule, AmountLimitRule>()
             .AddSingleton<IPaymentRule, BlockedUserRule>()
@@ -156,6 +156,34 @@ public class OrderPlacedConsumerTests
                 .Should().BeTrue();
             harness.Published.Select<PaymentProcessedEvent>(x => x.Context.Message.OrderId == orderId)
                 .Should().ContainSingle();
+        }
+        finally
+        {
+            await harness.Stop();
+        }
+    }
+
+    [Fact]
+    public async Task Consume_DeveRejeitar_QuandoUsuarioBloqueado_MesmoComValorOk()
+    {
+        // Valida que as regras de decisão (#4) propagam pelo consumer até o evento publicado.
+        var repo = new FakePaymentRepository();
+        await using var provider = BuildHarness(repo,
+            new PaymentsOptions { MaxApprovedAmount = 5000m, BlockedUserIds = ["banido"] });
+        var harness = provider.GetRequiredService<ITestHarness>();
+        await harness.Start();
+        try
+        {
+            var orderId = Guid.NewGuid();
+            await harness.Bus.Publish(new OrderPlacedEvent
+            {
+                OrderId = orderId, UserId = "banido", GameId = "g", Price = 100m // valor OK, mas usuário bloqueado
+            });
+
+            (await harness.Consumed.Any<OrderPlacedEvent>()).Should().BeTrue();
+            (await harness.Published.Any<PaymentProcessedEvent>(x =>
+                x.Context.Message.OrderId == orderId && x.Context.Message.Status == PaymentDecision.Rejected))
+                .Should().BeTrue();
         }
         finally
         {
