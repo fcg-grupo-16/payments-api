@@ -150,6 +150,10 @@ Todas as configurações podem ser sobrescritas por variáveis de ambiente usand
 | `RabbitMq__Host`              | Host do broker RabbitMQ.                                         | `localhost`        |
 | `RabbitMq__Username`          | Usuário do RabbitMQ.                                            | `guest`            |
 | `RabbitMq__Password`          | Senha do RabbitMQ.                                              | `guest`            |
+| `RabbitMq__ImmediateRetryCount`   | Nº de tentativas do retry imediato (exponencial) no consumer.              | `3`                |
+| `RabbitMq__DelayedRedeliverySeconds` | Intervalos (s, separados por vírgula) do delayed redelivery.           | `60,300,900`       |
+| `MongoDbSettings__ConnectionString` | Connection string do MongoDB (com `?replicaSet=rs0`).                  | `mongodb://localhost:27017/?replicaSet=rs0` |
+| `MongoDbSettings__DatabaseName`   | Nome do database de auditoria dos pagamentos.                             | `paymentsdb`       |
 | `Payments__MaxApprovedAmount` | Valor máximo aprovado automaticamente; acima disso é rejeitado. | `5000`             |
 | `ASPNETCORE_ENVIRONMENT`      | Ambiente da aplicação (`Development` / `Production`).            | `Production`       |
 
@@ -162,7 +166,7 @@ Todas as configurações podem ser sobrescritas por variáveis de ambiente usand
 1. Suba um RabbitMQ (ver [Pré-requisitos](#4-pré-requisitos)):
 
 ```bash
-docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3-management
+docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 masstransit/rabbitmq:3.13.1
 ```
 
 2. Rode o serviço:
