@@ -39,11 +39,17 @@ builder.Services.AddMassTransit(x =>
 
 // Health checks das DEPENDÊNCIAS, tagueadas "ready" (entram no /health/ready). Ambas as deps
 // (Mongo e RabbitMQ) precisam da tag — senão não são checadas (lição do bug do catalog-api).
-var rabbitUri = $"amqp://{rabbitUser}:{rabbitPass}@{rabbitHost}:5672/";
+// ConnectionFactory por propriedades (não por URI): evita quebra com caracteres reservados nas
+// credenciais e não embute a senha numa string que possa vazar em logs.
 builder.Services.AddHealthChecks()
     .AddMongoDb(sp => sp.GetRequiredService<IMongoClient>(), name: "mongodb", tags: ["ready"])
-    .AddRabbitMQ(sp => new ConnectionFactory { Uri = new Uri(rabbitUri) }.CreateConnectionAsync(),
-        name: "rabbitmq", tags: ["ready"]);
+    .AddRabbitMQ(sp => new ConnectionFactory
+    {
+        HostName = rabbitHost,
+        UserName = rabbitUser,
+        Password = rabbitPass,
+        Port = 5672
+    }.CreateConnectionAsync(), name: "rabbitmq", tags: ["ready"]);
 
 var app = builder.Build();
 
