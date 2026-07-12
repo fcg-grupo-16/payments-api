@@ -3,6 +3,7 @@ using Fcg.Payments.Payments;
 using Fcg.Payments.Persistence;
 using MassTransit;
 using MongoDB.Driver;
+using RabbitMQ.Client;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -19,6 +20,11 @@ builder.Services.AddSingleton<IMongoClient>(_ => new MongoClient(mongoConnection
 builder.Services.AddSingleton(sp => sp.GetRequiredService<IMongoClient>().GetDatabase(mongoDatabaseName));
 builder.Services.AddScoped<IPaymentRepository, PaymentRepository>();
 
+// Config do RabbitMQ (reutilizada pela mensageria e pelo health check).
+var rabbitHost = builder.Configuration["RabbitMq:Host"] ?? "localhost";
+var rabbitUser = builder.Configuration["RabbitMq:Username"] ?? "guest";
+var rabbitPass = builder.Configuration["RabbitMq:Password"] ?? "guest";
+
 builder.Services.AddMassTransit(x =>
 {
     // Prefixo por serviço garante filas distintas entre microsserviços.
@@ -26,18 +32,31 @@ builder.Services.AddMassTransit(x =>
     x.AddConsumer<OrderPlacedConsumer>();
     x.UsingRabbitMq((ctx, cfg) =>
     {
-        var host = builder.Configuration["RabbitMq:Host"] ?? "localhost";
-        var user = builder.Configuration["RabbitMq:Username"] ?? "guest";
-        var pass = builder.Configuration["RabbitMq:Password"] ?? "guest";
-        cfg.Host(host, "/", h => { h.Username(user); h.Password(pass); });
+        cfg.Host(rabbitHost, "/", h => { h.Username(rabbitUser); h.Password(rabbitPass); });
         cfg.ConfigureEndpoints(ctx);
     });
 });
 
-builder.Services.AddHealthChecks();
+// Health checks das DEPENDÊNCIAS, tagueadas "ready" (entram no /health/ready). Ambas as deps
+// (Mongo e RabbitMQ) precisam da tag — senão não são checadas (lição do bug do catalog-api).
+var rabbitUri = $"amqp://{rabbitUser}:{rabbitPass}@{rabbitHost}:5672/";
+builder.Services.AddHealthChecks()
+    .AddMongoDb(sp => sp.GetRequiredService<IMongoClient>(), name: "mongodb", tags: ["ready"])
+    .AddRabbitMQ(sp => new ConnectionFactory { Uri = new Uri(rabbitUri) }.CreateConnectionAsync(),
+        name: "rabbitmq", tags: ["ready"]);
 
 var app = builder.Build();
 
+// Liveness: só o processo (sem dependências). Readiness: dependências tagueadas "ready".
+app.MapHealthChecks("/health/live", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = _ => false
+});
+app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")
+});
+// Agregado legado (compat): todos os checks.
 app.MapHealthChecks("/health");
 
 // Garante o índice único em OrderId no startup (idempotente).
