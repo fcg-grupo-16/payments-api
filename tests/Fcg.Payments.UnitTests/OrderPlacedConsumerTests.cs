@@ -128,9 +128,11 @@ public class OrderPlacedConsumerTests
             await harness.Bus.Publish(evt);
             await harness.Bus.Publish(evt);
 
-            // Aguarda os DOIS consumos antes de assertar (sem Take, para evitar ambiguidade).
+            // Aguarda os DOIS consumos antes de assertar (sem Take, para evitar ambiguidade), com
+            // timeout para não pendurar a suíte caso algo consuma menos que o esperado.
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             var consumidos = 0;
-            await foreach (var _ in harness.Consumed.SelectAsync<OrderPlacedEvent>())
+            await foreach (var _ in harness.Consumed.SelectAsync<OrderPlacedEvent>(cts.Token))
             {
                 if (++consumidos == 2)
                 {
