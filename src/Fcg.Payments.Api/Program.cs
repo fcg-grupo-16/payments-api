@@ -66,17 +66,18 @@ builder.Services.AddMassTransit(x =>
 });
 
 // Conexão RabbitMQ ÚNICA (singleton) para o health check reusar — com recuperação automática,
-// para reconectar sozinha quando o broker voltar. Criada de forma lazy (na 1ª checagem).
+// para reconectar sozinha quando o broker voltar. Criada no startup em contexto async (sem
+// sync-over-async); o broker já está up aqui (initContainer wait-for-rabbitmq / depends_on).
 // Evita o leak de abrir/descartar uma conexão a cada readiness (que saturava o broker).
-builder.Services.AddSingleton<IConnection>(_ =>
-    new ConnectionFactory
-    {
-        HostName = rabbitHost,
-        UserName = rabbitUser,
-        Password = rabbitPass,
-        Port = 5672,
-        AutomaticRecoveryEnabled = true
-    }.CreateConnectionAsync().GetAwaiter().GetResult());
+var rabbitConnection = await new ConnectionFactory
+{
+    HostName = rabbitHost,
+    UserName = rabbitUser,
+    Password = rabbitPass,
+    Port = 5672,
+    AutomaticRecoveryEnabled = true
+}.CreateConnectionAsync();
+builder.Services.AddSingleton<IConnection>(rabbitConnection);
 
 // Health checks das DEPENDÊNCIAS, tagueadas "ready" (entram no /health/ready):
 // - Mongo: AddMongoDb reusa o IMongoClient singleton (sem abrir conexão por check).
