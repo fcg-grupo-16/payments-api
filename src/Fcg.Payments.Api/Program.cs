@@ -65,27 +65,59 @@ builder.Services.AddMassTransit(x =>
     });
 });
 
-// Conexão RabbitMQ ÚNICA (singleton) para o health check reusar — com recuperação automática,
-// para reconectar sozinha quando o broker voltar. Criada no startup em contexto async (sem
-// sync-over-async); o broker já está up aqui (initContainer wait-for-rabbitmq / depends_on).
-// Evita o leak de abrir/descartar uma conexão a cada readiness (que saturava o broker).
-var rabbitConnection = await new ConnectionFactory
-{
-    HostName = rabbitHost,
-    UserName = rabbitUser,
-    Password = rabbitPass,
-    Port = 5672,
-    AutomaticRecoveryEnabled = true
-}.CreateConnectionAsync();
-builder.Services.AddSingleton<IConnection>(rabbitConnection);
+// Conexão RabbitMQ ÚNICA e reutilizada pelo health check. Antes o AddRabbitMQ abria uma conexão
+// nova a cada readiness sem fechá-la (leak que saturava o broker). A factory cria a conexão UMA vez
+// e a reusa em todas as checagens — com auto-recovery para reconectar quando o broker volta. O lock
+// (double-checked) evita a criação concorrente se dois probes chegarem simultaneamente; se a conexão
+// estiver fechada (recovery esgotado) ela é descartada e RECRIADA na próxima check — por isso não
+// usamos Lazy<Task<IConnection>>, que cachearia uma Task falhada (broker fora no 1º check) e deixaria
+// o readiness preso em 503 mesmo após o broker voltar. Lazy e assíncrona (sem sync-over-async, sem
+// bloquear o startup): o processo sobe mesmo com o broker fora/lento, o check reporta 503, e uma
+// tentativa futura reconecta (200).
+var healthRabbitLock = new SemaphoreSlim(1, 1);
+IConnection? healthRabbitConnection = null;
 
 // Health checks das DEPENDÊNCIAS, tagueadas "ready" (entram no /health/ready):
 // - Mongo: AddMongoDb reusa o IMongoClient singleton (sem abrir conexão por check).
-// - RabbitMQ: AddRabbitMQ SEM factory -> reusa a IConnection singleton do DI (sem leak); um canal
-//   por check detecta o broker fora (503) e a auto-recovery reconecta quando ele volta (200).
+// - RabbitMQ: factory lazy que reusa uma única IConnection (sem leak); um canal por check detecta
+//   o broker fora (503) e a auto-recovery/recriação reconecta quando ele volta (200).
 builder.Services.AddHealthChecks()
     .AddMongoDb(sp => sp.GetRequiredService<IMongoClient>(), name: "mongodb", tags: ["ready"])
-    .AddRabbitMQ(name: "rabbitmq", tags: ["ready"]);
+    .AddRabbitMQ(
+        factory: async sp =>
+        {
+            if (healthRabbitConnection?.IsOpen == true)
+                return healthRabbitConnection;
+
+            await healthRabbitLock.WaitAsync();
+            try
+            {
+                if (healthRabbitConnection?.IsOpen == true)
+                    return healthRabbitConnection;
+
+                // A conexão anterior está fechada (recovery esgotado) — descarta antes de recriar.
+                if (healthRabbitConnection is not null)
+                {
+                    await healthRabbitConnection.DisposeAsync();
+                    healthRabbitConnection = null;
+                }
+
+                healthRabbitConnection = await new ConnectionFactory
+                {
+                    HostName = rabbitHost,
+                    UserName = rabbitUser,
+                    Password = rabbitPass,
+                    AutomaticRecoveryEnabled = true
+                }.CreateConnectionAsync();
+                return healthRabbitConnection;
+            }
+            finally
+            {
+                healthRabbitLock.Release();
+            }
+        },
+        name: "rabbitmq",
+        tags: ["ready"]);
 
 var app = builder.Build();
 
@@ -108,7 +140,12 @@ using (var scope = app.Services.CreateScope())
     await repo.GarantirIndicesAsync();
 }
 
-app.Run();
+await app.RunAsync();
+
+// Libera recursos da conexão de health check após o host encerrar (sem concorrência possível).
+if (healthRabbitConnection is not null)
+    await healthRabbitConnection.DisposeAsync();
+healthRabbitLock.Dispose();
 
 // Parse tolerante de RabbitMq:DelayedRedeliverySeconds. Ignora entradas inválidas/não-positivas e
 // faz fallback para os defaults (60/300/900s) se ausente/vazia/toda inválida — config ruim não
