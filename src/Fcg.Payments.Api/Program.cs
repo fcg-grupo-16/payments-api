@@ -86,30 +86,33 @@ builder.Services.AddHealthChecks()
     .AddRabbitMQ(
         factory: async sp =>
         {
-            if (healthRabbitConnection?.IsOpen == true)
-                return healthRabbitConnection;
+            var current = Volatile.Read(ref healthRabbitConnection);
+            if (current?.IsOpen == true)
+                return current;
 
             await healthRabbitLock.WaitAsync();
             try
             {
-                if (healthRabbitConnection?.IsOpen == true)
-                    return healthRabbitConnection;
+                current = Volatile.Read(ref healthRabbitConnection);
+                if (current?.IsOpen == true)
+                    return current;
 
                 // A conexão anterior está fechada (recovery esgotado) — descarta antes de recriar.
-                if (healthRabbitConnection is not null)
+                if (current is not null)
                 {
-                    await healthRabbitConnection.DisposeAsync();
-                    healthRabbitConnection = null;
+                    await current.DisposeAsync();
+                    Volatile.Write(ref healthRabbitConnection, null);
                 }
 
-                healthRabbitConnection = await new ConnectionFactory
+                var created = await new ConnectionFactory
                 {
                     HostName = rabbitHost,
                     UserName = rabbitUser,
                     Password = rabbitPass,
                     AutomaticRecoveryEnabled = true
                 }.CreateConnectionAsync();
-                return healthRabbitConnection;
+                Volatile.Write(ref healthRabbitConnection, created);
+                return created;
             }
             finally
             {
