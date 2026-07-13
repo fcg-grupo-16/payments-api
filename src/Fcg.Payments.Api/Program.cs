@@ -65,19 +65,26 @@ builder.Services.AddMassTransit(x =>
     });
 });
 
-// Health checks das DEPENDÊNCIAS, tagueadas "ready" (entram no /health/ready). Ambas as deps
-// (Mongo e RabbitMQ) precisam da tag — senão não são checadas (lição do bug do catalog-api).
-// ConnectionFactory por propriedades (não por URI): evita quebra com caracteres reservados nas
-// credenciais e não embute a senha numa string que possa vazar em logs.
-builder.Services.AddHealthChecks()
-    .AddMongoDb(sp => sp.GetRequiredService<IMongoClient>(), name: "mongodb", tags: ["ready"])
-    .AddRabbitMQ(sp => new ConnectionFactory
+// Conexão RabbitMQ ÚNICA (singleton) para o health check reusar — com recuperação automática,
+// para reconectar sozinha quando o broker voltar. Criada de forma lazy (na 1ª checagem).
+// Evita o leak de abrir/descartar uma conexão a cada readiness (que saturava o broker).
+builder.Services.AddSingleton<IConnection>(_ =>
+    new ConnectionFactory
     {
         HostName = rabbitHost,
         UserName = rabbitUser,
         Password = rabbitPass,
-        Port = 5672
-    }.CreateConnectionAsync(), name: "rabbitmq", tags: ["ready"]);
+        Port = 5672,
+        AutomaticRecoveryEnabled = true
+    }.CreateConnectionAsync().GetAwaiter().GetResult());
+
+// Health checks das DEPENDÊNCIAS, tagueadas "ready" (entram no /health/ready):
+// - Mongo: AddMongoDb reusa o IMongoClient singleton (sem abrir conexão por check).
+// - RabbitMQ: AddRabbitMQ SEM factory -> reusa a IConnection singleton do DI (sem leak); um canal
+//   por check detecta o broker fora (503) e a auto-recovery reconecta quando ele volta (200).
+builder.Services.AddHealthChecks()
+    .AddMongoDb(sp => sp.GetRequiredService<IMongoClient>(), name: "mongodb", tags: ["ready"])
+    .AddRabbitMQ(name: "rabbitmq", tags: ["ready"]);
 
 var app = builder.Build();
 
