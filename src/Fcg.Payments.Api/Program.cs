@@ -1,5 +1,6 @@
 using System.Globalization;
 using Fcg.Payments.Consumers;
+using Fcg.Payments.Observability;
 using Fcg.Payments.Payments;
 using Fcg.Payments.Payments.Rules;
 using Fcg.Payments.Persistence;
@@ -11,6 +12,11 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<PaymentsOptions>(
     builder.Configuration.GetSection(PaymentsOptions.SectionName));
+
+// Observabilidade (issues #19/#20): métricas Prometheus em /metrics e traces OTLP.
+// Sem isto o pod anunciava prometheus.io/scrape "true" e respondia 404, e a cadeia de trace da
+// compra se partia aqui, no meio do fluxo.
+builder.Services.AddObservability(builder.Configuration, builder.Environment);
 
 // MongoDB (paymentsdb) — auditoria dos pagamentos. Config por ambiente (12-factor), na convenção
 // da plataforma (MongoDbSettings__*, provisionada no orchestration), com fallback local.
@@ -135,6 +141,9 @@ app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.Health
 });
 // Agregado legado (compat): todos os checks.
 app.MapHealthChecks("/health");
+
+// /metrics — raspado pelo Prometheus DE DENTRO do cluster (o gateway não cria rota para ele).
+app.MapPrometheusScrapingEndpoint();
 
 // Garante o índice único em OrderId no startup (idempotente).
 using (var scope = app.Services.CreateScope())

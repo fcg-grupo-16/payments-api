@@ -13,7 +13,7 @@ O PaymentsAPI é um serviço **orientado a eventos** (event-driven). Ele não ex
 O fluxo é:
 
 ```
-CatalogAPI                         PaymentsAPI                       CatalogAPI / NotificationsAPI
+CatalogAPI                         PaymentsAPI                       CatalogAPI / notifications-function
    │                                   │                                        │
    │  publica OrderPlacedEvent         │                                        │
    ├──────────────────────────────────▶                                        │
@@ -40,14 +40,26 @@ CatalogAPI                         PaymentsAPI                       CatalogAPI 
 
 Os contratos de evento ficam no namespace **`Fcg.Contracts.Events`** e devem ser **idênticos em todos os serviços FCG** (o MassTransit identifica a mensagem pela URN derivada de `namespace:NomeDoTipo`).
 
-### Regra de aprovação
+### Regras de aprovação
 
-A decisão é **determinística** (para tornar o demo reproduzível):
+A decisão passa por **quatro regras independentes**, avaliadas na ordem de registro; **a primeira
+que rejeitar decide**, e o nome dela acompanha o resultado (ver
+[Decisão](#decisão-ipaymentdecider--regras-plugáveis)):
 
-- `Approved` quando `Price <= Payments:MaxApprovedAmount` (padrão `5000`);
-- `Rejected` caso contrário.
+| Regra | Rejeita quando | Configuração |
+| --- | --- | --- |
+| `AmountLimit` | `Price > Payments:MaxApprovedAmount` | padrão `5000` |
+| `BlockedUser` | o `UserId` está na lista de bloqueados | vazia por padrão |
+| `BlockedGame` | o `GameId` está na lista de bloqueados | vazia por padrão |
+| `RandomFailure` | sorteio abaixo de `Payments:RandomFailureRate` | `0` por padrão |
 
-> Como o valor exatamente igual ao limite é aprovado, o limite padrão de `5000` aprova qualquer pedido de até R$ 5.000,00 inclusive.
+> O valor exatamente **igual** ao limite é aprovado: o padrão de `5000` aprova qualquer pedido de
+> até R$ 5.000,00 inclusive.
+
+> ⚠️ **A decisão só é determinística com `RandomFailureRate = 0`**, que é o padrão. Acima de zero, a
+> `RandomFailureRule` rejeita por sorteio — é o que ela existe para fazer, e serve para exercitar o
+> caminho de rejeição numa demonstração. Com a taxa em zero, as outras três regras são puramente
+> determinísticas.
 
 ---
 
@@ -98,22 +110,85 @@ payments-api/
 
 Em `src/Fcg.Payments.Api/Consumers/OrderPlacedConsumer.cs`. É um `IConsumer<OrderPlacedEvent>` do MassTransit. A cada pedido recebido ele:
 
-1. registra um log com `OrderId`, `UserId`, `GameId` e `Price`;
-2. aguarda um delay fixo de 500 ms (simulação de processamento);
-3. chama `PaymentDecision.Decide(...)` para obter o status;
-4. registra o log da decisão (incluindo o limite vigente);
-5. publica `PaymentProcessedEvent` com o resultado.
+1. enriquece o span do trace distribuído com `OrderId`, `UserId`, `GameId` e `Price`;
+2. registra um log com os mesmos campos;
+3. aguarda um delay fixo de 500 ms (simulação de processamento);
+4. chama `IPaymentDecider.Decide(...)`, que devolve um `PaymentOutcome` (status **e** regra);
+5. **persiste** o registro de auditoria no MongoDB — a inserção é a própria idempotência, por
+   índice único em `OrderId`;
+6. se o registro já existia (duplicata), conta a métrica `status="Duplicate"`, loga e **retorna
+   sem republicar** — garantindo um único `PaymentProcessedEvent` por pedido;
+7. senão, conta a decisão e a duração nas métricas, registra o log e publica
+   `PaymentProcessedEvent`.
 
-### `PaymentDecision`
+### Decisão: `IPaymentDecider` + regras plugáveis
 
-Em `src/Fcg.Payments.Api/Payments/PaymentDecision.cs`. Contém a **lógica de negócio isolada e testável** — uma classe estática pura, sem dependências de infraestrutura:
+A decisão **não** é mais uma função estática de duas variáveis. Ela vive em
+`src/Fcg.Payments.Api/Payments/`:
+
+| Tipo | Papel |
+| --- | --- |
+| `IPaymentRule` | uma regra independente: `bool Rejects(PaymentContext)` mais um `Name` estável |
+| `AmountLimitRule` · `BlockedUserRule` · `BlockedGameRule` · `RandomFailureRule` | as quatro regras registradas no DI, nesta ordem |
+| `PaymentDecider` | combina as regras: **a primeira** que rejeitar decide |
+| `PaymentOutcome` | o resultado: `Status` (`Approved`/`Rejected`) **e** `Rule` |
+| `PaymentDecision` | as constantes de status |
 
 ```csharp
-public static string Decide(decimal price, decimal maxApprovedAmount)
-    => price <= maxApprovedAmount ? Approved : Rejected;
+public PaymentOutcome Decide(PaymentContext context)
+{
+    var rejeitadora = rules.FirstOrDefault(rule => rule.Rejects(context));
+
+    return rejeitadora is null
+        ? PaymentOutcome.Aprovado()
+        : PaymentOutcome.Rejeitado(rejeitadora.Name);
+}
 ```
 
-Por ser uma função pura, ela é facilmente testada de forma unitária (ver seção [Testes](#11-testes)), enquanto o `OrderPlacedConsumer` cuida apenas da orquestração (mensageria, log e delay).
+O `Name` de cada regra é uma **constante explícita**, e não `GetType().Name`: ele vira label da
+métrica `fcg_payment_decisions_total`, e derivá-lo do tipo faria um simples rename de classe quebrar
+dashboards silenciosamente.
+
+> ⚠️ **Quando mais de uma regra rejeitaria, a creditada é a primeira na ordem de registro no DI.**
+> É determinístico, mas reordenar os `AddSingleton` do `Program.cs` muda a distribuição do label
+> `rule` sem alterar nenhuma decisão.
+
+### Observabilidade — métricas e traces
+
+Este serviço **não tem controller**: é um worker que consome do RabbitMQ. Por isso as métricas HTTP
+automáticas do ASP.NET Core saem quase vazias em `/metrics` — o que **está correto, não é defeito**.
+O valor aqui está nos traces e na métrica de negócio.
+
+| Métrica | Tipo | Labels |
+| --- | --- | --- |
+| `fcg_payment_decisions_total` | counter | `status` (`Approved`/`Rejected`/`Duplicate`), `rule` |
+| `fcg_payment_processing_duration_seconds` | histogram | — |
+
+> ⚠️ **`status="Duplicate"` NÃO é uma decisão** — é uma reentrega que a idempotência descartou.
+> Incluí-la contaria o mesmo pagamento duas vezes e distorceria a taxa de aprovação. **Exclua-a**
+> dos cálculos:
+>
+> ```promql
+> # Taxa de aprovação (excluindo duplicatas)
+> 100 * sum(rate(fcg_payment_decisions_total{status="Approved"}[5m]))
+>     / sum(rate(fcg_payment_decisions_total{status=~"Approved|Rejected"}[5m]))
+>
+> # Decisões por status
+> sum by (status) (rate(fcg_payment_decisions_total[5m]))
+>
+> # Rejeições por regra — responde "por que estamos rejeitando?"
+> sum by (rule) (rate(fcg_payment_decisions_total{status="Rejected"}[5m]))
+> ```
+
+**Cardinalidade:** os labels são `status` (3 valores) e `rule` (número fixo de regras). Nunca
+acrescente `UserId`, `OrderId` ou `GameId` como label — cada valor novo cria uma série no Prometheus.
+Esses ids estão onde devem estar: nos **atributos de span** (`fcg.order.id`, `fcg.user.id`,
+`fcg.game.id`, `fcg.payment.status`, `fcg.payment.rule`).
+
+**Traces.** O `.AddSource("MassTransit")` é o que costura
+`catalog-api → RabbitMQ → payments-api → RabbitMQ → catalog-api` num único trace. Sem ele este
+serviço não continua o contexto recebido nem o propaga adiante, e a cadeia da compra se parte em
+traces órfãos — que era o estado medido antes das issues #19/#20.
 
 ---
 
@@ -155,6 +230,12 @@ Todas as configurações podem ser sobrescritas por variáveis de ambiente usand
 | `MongoDbSettings__ConnectionString` | Connection string do MongoDB (com `?replicaSet=rs0`).                  | `mongodb://localhost:27017/?replicaSet=rs0` |
 | `MongoDbSettings__DatabaseName`   | Nome do database de auditoria dos pagamentos.                             | `paymentsdb`       |
 | `Payments__MaxApprovedAmount` | Valor máximo aprovado automaticamente; acima disso é rejeitado. | `5000`             |
+| `Payments__BlockedUserIds__0` | UserIds bloqueados (lista; índice por item). Qualquer pedido deles é rejeitado. | *(vazio)* |
+| `Payments__BlockedGameIds__0` | GameIds bloqueados (lista; índice por item).                     | *(vazio)*          |
+| `Payments__RandomFailureRate` | Taxa (0..1) de rejeição aleatória, para simular falhas.          | `0`                |
+| `OTEL_SERVICE_NAME`           | Nome do serviço nos traces e métricas.                           | `payments-api`     |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Endpoint OTLP do coletor (Jaeger). **Ausente = traces desligados**, de propósito: mantém `dotnet run` e os testes funcionando sem Jaeger no ar. | *(vazio)* |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | Protocolo OTLP (`grpc` no cluster).                              | `grpc`             |
 | `ASPNETCORE_ENVIRONMENT`      | Ambiente da aplicação (`Development` / `Production`).            | `Production`       |
 
 > A porta de escuta dentro do container é definida no `Dockerfile` via `ASPNETCORE_URLS=http://+:8080`.
@@ -231,7 +312,7 @@ docker compose up
 1. **Cadastre um usuário** no UsersAPI.
 2. **Inicie uma compra** de um jogo no CatalogAPI — isso publica um `OrderPlacedEvent`.
 3. **Observe o log do PaymentsAPI** (`docker compose logs -f payments-api`): você verá as duas linhas de log (`Pedido recebido...` e `Pagamento processado... Status=Approved`).
-4. Se aprovado, o CatalogAPI adiciona o jogo à biblioteca do usuário e o NotificationsAPI envia a confirmação.
+4. Se aprovado, o CatalogAPI adiciona o jogo à biblioteca do usuário e a `notifications-function` — serverless, acordada do zero pelo KEDA — envia a confirmação.
 
 ### Forçando um `Rejected`
 
@@ -247,7 +328,7 @@ Como a decisão depende apenas de `Price` vs. `Payments__MaxApprovedAmount`, há
 | Direção      | Evento                  | Origem / Destino                             | Campos                                                                 |
 | ------------ | ----------------------- | -------------------------------------------- | ---------------------------------------------------------------------- |
 | **Consome**  | `OrderPlacedEvent`      | Publicado pelo CatalogAPI                    | `OrderId` (Guid), `UserId` (string), `GameId` (string), `Price` (decimal) |
-| **Publica**  | `PaymentProcessedEvent` | Consumido por CatalogAPI e NotificationsAPI  | `OrderId` (Guid), `UserId` (string), `GameId` (string), `Price` (decimal), `Status` (string: `Approved`/`Rejected`) |
+| **Publica**  | `PaymentProcessedEvent` | Consumido por CatalogAPI e pela `notifications-function` | `OrderId` (Guid), `UserId` (string), `GameId` (string), `Price` (decimal), `Status` (string: `Approved`/`Rejected`) |
 
 Ambos os contratos vivem em `src/Fcg.Payments.Api/Contracts/Events.cs`, no namespace `Fcg.Contracts.Events`, e precisam ser idênticos em todos os serviços FCG.
 
