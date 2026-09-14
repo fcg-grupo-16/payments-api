@@ -8,6 +8,9 @@ namespace Fcg.Payments.Payments.Rules;
 /// </summary>
 public sealed class RandomFailureRule(IOptions<PaymentsOptions> options, IRandomSource random) : IPaymentRule
 {
+    /// <inheritdoc />
+    public string Name => "RandomFailure";
+
     public bool Rejects(PaymentContext context)
     {
         var rate = options.Value.RandomFailureRate;

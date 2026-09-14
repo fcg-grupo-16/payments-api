@@ -48,7 +48,7 @@ public class PaymentDeciderTests
     {
         var decider = BuildDecider(new PaymentsOptions { MaxApprovedAmount = Limit });
 
-        decider.Decide(Order(price)).Should().Be(PaymentDecision.Approved);
+        decider.Decide(Order(price)).Status.Should().Be(PaymentDecision.Approved);
     }
 
     [Theory]
@@ -59,7 +59,7 @@ public class PaymentDeciderTests
     {
         var decider = BuildDecider(new PaymentsOptions { MaxApprovedAmount = Limit });
 
-        decider.Decide(Order(price)).Should().Be(PaymentDecision.Rejected);
+        decider.Decide(Order(price)).Status.Should().Be(PaymentDecision.Rejected);
     }
 
     [Fact]
@@ -71,8 +71,8 @@ public class PaymentDeciderTests
             BlockedUserIds = ["banido"]
         });
 
-        decider.Decide(Order(100m, userId: "banido")).Should().Be(PaymentDecision.Rejected);
-        decider.Decide(Order(100m, userId: "ok")).Should().Be(PaymentDecision.Approved);
+        decider.Decide(Order(100m, userId: "banido")).Status.Should().Be(PaymentDecision.Rejected);
+        decider.Decide(Order(100m, userId: "ok")).Status.Should().Be(PaymentDecision.Approved);
     }
 
     [Fact]
@@ -84,8 +84,8 @@ public class PaymentDeciderTests
             BlockedGameIds = ["jogo-proibido"]
         });
 
-        decider.Decide(Order(100m, gameId: "jogo-proibido")).Should().Be(PaymentDecision.Rejected);
-        decider.Decide(Order(100m, gameId: "outro")).Should().Be(PaymentDecision.Approved);
+        decider.Decide(Order(100m, gameId: "jogo-proibido")).Status.Should().Be(PaymentDecision.Rejected);
+        decider.Decide(Order(100m, gameId: "outro")).Status.Should().Be(PaymentDecision.Approved);
     }
 
     [Fact]
@@ -95,7 +95,8 @@ public class PaymentDeciderTests
 
         var a = decider.Decide(Order(100m));
         var b = decider.Decide(Order(100m));
-        a.Should().Be(PaymentDecision.Approved).And.Be(b);
+        a.Status.Should().Be(PaymentDecision.Approved);
+        a.Should().Be(b);
     }
 
     [Fact]
@@ -108,7 +109,67 @@ public class PaymentDeciderTests
 
         var resultados = Enumerable.Range(0, 4).Select(_ => decider.Decide(Order(100m))).ToList();
 
-        resultados.Count(r => r == PaymentDecision.Rejected).Should().Be(2);
-        resultados.Count(r => r == PaymentDecision.Approved).Should().Be(2);
+        resultados.Count(r => r.Status == PaymentDecision.Rejected).Should().Be(2);
+        resultados.Count(r => r.Status == PaymentDecision.Approved).Should().Be(2);
+    }
+
+    [Fact]
+    public void Decide_DeveNomearARegra_QuandoRejeitaPorValor()
+    {
+        var decider = BuildDecider(new PaymentsOptions { MaxApprovedAmount = Limit });
+
+        var outcome = decider.Decide(Order(9999m));
+
+        outcome.Status.Should().Be(PaymentDecision.Rejected);
+        outcome.Rule.Should().Be("AmountLimit");
+    }
+
+    [Fact]
+    public void Decide_DeveNomearARegra_QuandoRejeitaPorUsuarioBloqueado()
+    {
+        var decider = BuildDecider(new PaymentsOptions
+        {
+            MaxApprovedAmount = Limit,
+            BlockedUserIds = ["banido"]
+        });
+
+        decider.Decide(Order(100m, userId: "banido")).Rule.Should().Be("BlockedUser");
+    }
+
+    [Fact]
+    public void Decide_DeveNomearARegra_QuandoRejeitaPorJogoBloqueado()
+    {
+        var decider = BuildDecider(new PaymentsOptions
+        {
+            MaxApprovedAmount = Limit,
+            BlockedGameIds = ["jogo-proibido"]
+        });
+
+        decider.Decide(Order(100m, gameId: "jogo-proibido")).Rule.Should().Be("BlockedGame");
+    }
+
+    [Fact]
+    public void Decide_Aprovado_DeveUsarSemRegra()
+    {
+        var decider = BuildDecider(new PaymentsOptions { MaxApprovedAmount = Limit });
+
+        var outcome = decider.Decide(Order(100m));
+
+        outcome.Status.Should().Be(PaymentDecision.Approved);
+        outcome.Rule.Should().Be(PaymentOutcome.SemRegra);
+    }
+
+    [Fact]
+    public void Decide_ComDuasRegrasRejeitando_DeveCreditarAPRIMEIRA()
+    {
+        // Documenta a semântica do FirstOrDefault: a ordem de registro decide o label `rule`.
+        // Valor acima do limite E usuário bloqueado -> AmountLimit vem primeiro na lista.
+        var decider = BuildDecider(new PaymentsOptions
+        {
+            MaxApprovedAmount = Limit,
+            BlockedUserIds = ["banido"]
+        });
+
+        decider.Decide(Order(9999m, userId: "banido")).Rule.Should().Be("AmountLimit");
     }
 }

@@ -14,6 +14,15 @@
     <PackageReference Include="MongoDB.Driver" Version="3.9.0" />
     <PackageReference Include="AspNetCore.HealthChecks.Rabbitmq" Version="9.0.0" />
     <PackageReference Include="AspNetCore.HealthChecks.MongoDb" Version="9.0.0" />
+
+    <!-- Observabilidade (Fase 3, issues #19/#20) — OpenTelemetry: métricas em formato Prometheus
+         + traces OTLP. Versões IDÊNTICAS às de users-api e catalog-api: divergir aqui levaria a
+         comportamento diferente entre serviços da mesma plataforma, difícil de diagnosticar. -->
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.18.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.18.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.18.0" />
+    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.18.0-beta.1" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.18.0" />
   </ItemGroup>
 
 </Project>
