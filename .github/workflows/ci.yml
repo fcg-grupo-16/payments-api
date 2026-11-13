@@ -21,8 +21,48 @@ jobs:
       - name: Restore
         run: dotnet restore
 
+      # SCA: os outros três serviços já tinham; este era o único sem (#22).
+      # `--include-transitive`: a vulnerabilidade costuma estar no pacote que o seu pacote arrasta.
+      # `tee` + `grep`: o `dotnet list package --vulnerable` sai com código 0 mesmo quando ACHA
+      # vulnerabilidade — sem inspecionar a saída, o passo nunca reprovaria.
+      - name: SCA - detectar pacotes vulneraveis (High/Critical)
+        shell: bash
+        run: |
+          dotnet list package --vulnerable --include-transitive 2>&1 | tee vuln.txt
+          if grep -qiE 'High|Critical' vuln.txt; then
+            echo "::error::Dependências vulneráveis (High/Critical) encontradas"
+            exit 1
+          fi
+
       - name: Build
         run: dotnet build -c Release --no-restore
 
       - name: Test
         run: dotnet test -c Release --no-build
+
+      # --- Fase 4: containerização ---------------------------------------------------------------
+      # A tag é o SHA DO COMMIT, não `latest` nem o nome da branch. Tag móvel é a causa raiz do
+      # "deploy que não muda nada" (orchestration#40), e `github.ref_name` vira `22/merge` em PR, que
+      # o Docker lê como registry `payments-api` na porta 22.
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build da imagem
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false                     # ainda não: o push para o ECR depende da conta (#22, Parte 2)
+          tags: ${{ github.event.repository.name }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          load: true                      # carrega no daemon local, para o passo de smoke
+
+      # Prova que a imagem SOBE, não só que compila. Sem RabbitMQ no runner, o MassTransit loga erro
+      # de conexão e segue tentando em segundo plano — o processo continua vivo, que é o que se mede.
+      - name: A imagem inicia?
+        run: |
+          docker run -d --name smoke ${{ github.event.repository.name }}:${{ github.sha }}
+          sleep 10
+          docker logs smoke
+          docker inspect --format '{{.State.Running}}' smoke | grep -q '^true$' \
+            || { echo "::error::o container morreu nos primeiros 10s"; docker logs smoke; exit 1; }
